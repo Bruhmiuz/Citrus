@@ -6,6 +6,7 @@ from .standardization import Standardization
 from .core import (
     Identity,
     ArgmaxResample,
+    ExactNextToken,
     SoftmaxEmbedMixture,
     MLPCore,
     Codebook,
@@ -23,6 +24,7 @@ __all__ = [
     "Standardization",
     "Identity",
     "ArgmaxResample",
+    "ExactNextToken",
     "SoftmaxEmbedMixture",
     "MLPCore",
     "Codebook",
