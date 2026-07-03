@@ -19,46 +19,26 @@ class Identity(nn.Module):
         return h
 
 
-class ArgmaxResample(nn.Module):
-    """CoT-style core: project to vocabulary, take argmax, re-embed.
-
-    Non-differentiable through the argmax; used for inference-time
-    instantiations or as a baseline. With k_in = k_out = 0, this is the
-    embed/unembed-only CoT loop.
-    """
-    def __init__(self, unembed: nn.Linear, embed: nn.Embedding):
-        super().__init__()
-        self.unembed = unembed
-        self.embed = embed
-
-    def forward(self, h: torch.Tensor) -> torch.Tensor:
-        logits = self.unembed(h)
-        ids = logits.argmax(dim=-1)
-        return self.embed(ids)
-
-
 class ExactNextToken(nn.Module):
-    """CoT core wired to the base model's *exact* next-token prediction head.
+    """CoT-style core: re-embed the model's exact greedy next-token prediction.
 
-    Identical to ArgmaxResample except that it reproduces the model's genuine
-    logits by running the final norm before the unembedding, exactly as
-    ReasoningLoopModel.decode does:
+    Projects the hidden state to the vocabulary through the base model's
+    genuine prediction head — the final norm followed by the unembedding,
+    exactly as ReasoningLoopModel.decode does — then argmaxes and re-embeds:
 
         S(h) = embed( argmax( lm_head( norm(h) ) ) )
 
-    ArgmaxResample applies `lm_head` to the raw incoming hidden state, so its
-    argmax is *not* the model's real prediction; feeding the same `norm` the
-    decode stage uses makes the chosen token the model's true greedy
-    next-token prediction for that position. `norm` may be None for base
-    models with no final normalisation, in which case this reduces exactly to
-    ArgmaxResample.
+    Running `norm` before `lm_head` is what makes the chosen token the model's
+    true greedy prediction rather than an un-normed approximation. `norm` may
+    be None for base models with no final normalisation layer.
 
-    Caveats (unchanged from ArgmaxResample): non-differentiable through the
-    argmax, and per-position — it does not shift, grow, or preserve prompt
-    tokens. Autoregressive-CoT sequence semantics live in the loop, not the
-    core. "Exact" refers to the prediction *head*; whether the hidden state
-    reaching this core is the model's true final-layer state depends on the
-    tail Boundary spanning the full tail region (or k_out = 0).
+    Non-differentiable through the argmax; used for inference-time
+    instantiations or as a CoT baseline. Per-position: it does not shift,
+    grow, or preserve prompt tokens — autoregressive-CoT sequence semantics
+    live in the loop, not the core. "Exact" refers to the prediction *head*;
+    whether the hidden state reaching this core is the model's true
+    final-layer state depends on the tail Boundary spanning the full tail
+    region (or k_out = 0).
     """
     def __init__(self, norm: nn.Module | None, unembed: nn.Linear,
                  embed: nn.Embedding):

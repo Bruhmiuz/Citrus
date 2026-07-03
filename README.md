@@ -16,7 +16,7 @@ reasoning_body/
 ├── lora.py              LoRADelta + hook-based activation
 ├── boundary.py          The Boundary module (per-layer LoRA / frozen / implicit-skip)
 ├── standardization.py   Standardization = tail + core_S + head (one per S)
-├── core.py              Identity, ArgmaxResample, SoftmaxEmbedMixture, MLPCore, Codebook
+├── core.py              Identity, ExactNextToken, SoftmaxEmbedMixture, MLPCore, Codebook
 ├── model.py             ReasoningLoopModel — encode / loop_step / decode pipeline
 ├── configurations.py    Canonical configurations (COCONUT, CoT, Soft Thinking, novel)
 └── __init__.py
@@ -46,7 +46,7 @@ A rank list shorter than the model's `k_in`/`k_out` means the outermost slots ar
 | `"zero"` (default) | `A ~ Kaiming, B = 0` → delta = 0 → wrapped layer ≡ base layer at init |
 | `"soft_skip"` | `scale·BA ≈ -W_topr` (rank-r truncated SVD of negated base weight) → wrapped layer ≈ `(W − W_topr)x` at init, partially neutralising the layer's contribution |
 
-`"soft_skip"` is the natural pair for outer-heavy + Identity core: the outer boundary layers are doing vocab-projection work that an Identity core does not want, and starting the LoRA close to "cancel it" is a shorter training path than starting at zero. For inner-heavy + vocab-grounded cores (Soft Thinking, ArgmaxResample), `"zero"` is fine — the boundary's natural action is already wanted, LoRA just refines it.
+`"soft_skip"` is the natural pair for outer-heavy + Identity core: the outer boundary layers are doing vocab-projection work that an Identity core does not want, and starting the LoRA close to "cancel it" is a shorter training path than starting at zero. For inner-heavy + vocab-grounded cores (Soft Thinking, ExactNextToken), `"zero"` is fine — the boundary's natural action is already wanted, LoRA just refines it.
 
 **`train_base`** — when `True`, the Boundary unfreezes the parameters of every base layer it holds (both `ranks[i] == 0` slots and `ranks[i] > 0` slots). The base model body — the layers between `k_in` and `L − k_out` — stays frozen regardless. Use this to replicate CoT-style fine-tuning of the boundary region:
 
@@ -55,7 +55,7 @@ A rank list shorter than the model's `k_in`/`k_out` means the outermost slots ar
 head_cfg, tail_cfg, _ = cfgs.frozen_baseline(k_in=4, k_out=4, train_base=True)
 model = ReasoningLoopModel(
     base, k_in=4, k_out=4,
-    standardizations=[(head_cfg, tail_cfg, ArgmaxResample(base.lm_head, base.model.embed_tokens))],
+    standardizations=[(head_cfg, tail_cfg, ExactNextToken(base.model.norm, base.lm_head, base.model.embed_tokens))],
 )
 ```
 
@@ -131,6 +131,29 @@ model = ReasoningLoopModel(
 )
 ```
 
+## Freeze modes
+
+`model.set_freeze_mode(mode)` toggles which of the two trainable-eligible components carries gradients. It rewrites `requires_grad` on exactly two parameter groups and records the choice on `model.freeze_mode`:
+
+- **reasoning** — the body layers `layers[k_in : L − k_out]` (`model.reasoning_parameters()`).
+- **standardization** — the LoRA adapters plus each `core_S`'s *own* parameters (`model.standardization_parameters()`). Base parameters a `core_S` merely references — `embed` / `norm` / `lm_head` in the vocabulary-grounded cores — are excluded; they stay frozen with the base.
+
+| mode | reasoning body | standardization |
+|---|---|---|
+| `"reasoning"` (default) | frozen | trainable |
+| `"standardization"` | trainable | frozen |
+| `"none"` | trainable | trainable |
+
+```python
+model.set_freeze_mode("standardization")   # train the body, freeze adapters + cores
+model.set_freeze_mode("none")              # train both
+print(model.freeze_mode)                    # -> "none"
+```
+
+The construction-time default is `"reasoning"` — the same frozen-body / trainable-standardization partition the base freeze already produces.
+
+**What the toggle never unfreezes:** the boundary base layers (first `k_in`, last `k_out`), `embed_tokens`, `norm`, and `lm_head` sit outside both groups and stay frozen (governed only by construction and `BoundaryConfig.train_base`). So `"none"` frees *all* transformer layers only when `k_in = k_out = 0`; with a non-empty boundary region those layers remain frozen. `set_freeze_mode` and `train_base` are orthogonal — the latter is the only path to training the boundary layers.
+
 ## Method mapping
 
 `ranks=[a, b, c, ...]` is innermost → outermost. A shorter list means the outer slots are implicitly skipped.
@@ -138,7 +161,7 @@ model = ReasoningLoopModel(
 | Method                  | k_in | k_out | head ranks            | tail ranks            | core_S               |
 |-------------------------|------|-------|-----------------------|-----------------------|----------------------|
 | COCONUT                 | 0    | 0     | —                     | —                     | Identity             |
-| CoT (embed/unembed)     | 0    | 0     | —                     | —                     | ArgmaxResample       |
+| CoT                     | 0    | 0     | —                     | —                     | ExactNextToken       |
 | Soft Thinking           | 0    | 0     | —                     | —                     | SoftmaxEmbedMixture  |
 | Frozen-boundary baseline| k    | k     | `[0]*k`               | `[0]*k`               | Identity             |
 | Uniform LoRA            | k    | k     | `[R]*k`               | `[R]*k`               | Identity             |
@@ -146,7 +169,9 @@ model = ReasoningLoopModel(
 | Outer-heavy LoRA        | 4    | 4     | `[2, 4, 8, 16]`       | `[2, 4, 8, 16]`       | Identity             |
 | Skip-outer + LoRA-inner | 4    | 4     | `[8, 8]` (outer skipped) | `[8, 8]` (outer skipped) | Identity             |
 
-Which shape is optimal is an empirical question and likely depends on `core_S` — inner-heavy is the natural fit for vocab-grounded cores (Soft Thinking, ArgmaxResample), outer-heavy for Identity / body-format cores. See the framework notes for the argument.
+Which shape is optimal is an empirical question and likely depends on `core_S` — inner-heavy is the natural fit for vocab-grounded cores (Soft Thinking, ExactNextToken), outer-heavy for Identity / body-format cores. See the framework notes for the argument.
+
+`ExactNextToken` re-embeds the model's exact greedy next-token prediction: it runs the final `norm` before the unembedding (`argmax(lm_head(norm(h)))`), exactly as `decode` does, so the re-embedded token is the base model's true prediction rather than an un-normed approximation. Construct it as `ExactNextToken(base.model.norm, base.lm_head, base.model.embed_tokens)` (pass `norm=None` for a base model with no final norm).
 
 ## Notes on FSDP
 
