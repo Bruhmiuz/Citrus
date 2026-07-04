@@ -83,7 +83,7 @@ def inner_heavy(k: int, max_rank: int = 16, decay: int = 2, alpha: float = 16.0,
     """Peak LoRA rank at the body-adjacent slot, decreasing outward.
 
     Slot i (distance i from the body) gets rank = max_rank // decay**i.
-    Predicted to suit vocab-grounded cores (Soft Thinking, ArgmaxResample)
+    Predicted to suit vocab-grounded cores (Soft Thinking, ExactNextToken)
     where core_S output already fits the outer boundary and inner layers
     do the work of re-fitting to body format.
     """

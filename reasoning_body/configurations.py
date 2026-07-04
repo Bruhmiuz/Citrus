@@ -10,7 +10,7 @@ from typing import Callable
 import torch.nn as nn
 
 from . import config as cfg
-from .core import Identity, ArgmaxResample, SoftmaxEmbedMixture, MLPCore, Codebook
+from .core import Identity, ExactNextToken, SoftmaxEmbedMixture, MLPCore, Codebook
 
 
 CoreFactory = Callable[[nn.Module], nn.Module]
@@ -27,9 +27,10 @@ def coconut() -> Configuration:
 
 
 def cot() -> Configuration:
-    """CoT (embed/unembed only): k_in = k_out = 0, S = argmax + re-embed."""
+    """CoT: k_in = k_out = 0, S = exact greedy next-token re-embed."""
     return (cfg.empty(), cfg.empty(),
-            lambda m: ArgmaxResample(m.lm_head, m.model.embed_tokens))
+            lambda m: ExactNextToken(getattr(m.model, "norm", None),
+                                     m.lm_head, m.model.embed_tokens))
 
 
 def soft_thinking(temperature: float = 1.0) -> Configuration:

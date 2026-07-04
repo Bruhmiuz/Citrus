@@ -47,20 +47,22 @@ model(input_ids, schedule=[0, 1, 0, 2])   # explicit list of standardization ind
 - `lora.py` — `LoRADelta` plus the `lora_active()` context manager that installs/removes forward hooks per Boundary call. Active only during loop steps.
 - `boundary.py` — `Boundary` owns LoRA deltas but holds base-layer references in a plain Python list (`_base_layers`), not `nn.ModuleList`, so FSDP parameter discovery doesn't double-count them. `Boundary.forward` is `@torch.compiler.disable`d to make the hook-induced graph break explicit.
 - `standardization.py` — `Standardization(base, head_cfg, tail_cfg, core_S, k_in, k_out)` bundles the per-S head/tail Boundaries and the core. One per entry in the model's standardizations list.
-- `core.py` — `S` implementations: `Identity`, `ArgmaxResample` (CoT), `SoftmaxEmbedMixture` (Soft Thinking), `MLPCore`, `Codebook`.
+- `core.py` — `S` implementations: `Identity`, `ExactNextToken` (CoT — re-embeds the model's exact `argmax(lm_head(norm(h)))` greedy prediction), `SoftmaxEmbedMixture` (Soft Thinking), `MLPCore`, `Codebook`.
 - `configurations.py` — canonical `(head_cfg, tail_cfg, core_factory)` triples; compose into a list to pass as `standardizations`.
-- `model.py` — `ReasoningLoopModel`; the only public-facing class.
+- `model.py` — `ReasoningLoopModel`; the only public-facing class. `set_freeze_mode(...)` toggles which component trains (see below).
 
 **`BoundaryConfig.ranks` semantics** (innermost→outermost, i.e. ranks[0] is adjacent to the body):
 - `ranks[i] > 0` → trainable LoRA adapter at that rank on the i-th inner slot
 - `ranks[i] == 0` → base layer runs in the loop, frozen, no delta
 - `i >= len(ranks)` → slot is **implicitly skipped** (layer bypassed in the loop)
 
-A config's rank list may be shorter than the model's `k_in`/`k_out` — outer slots are skipped automatically. Optimal shape (inner-heavy vs outer-heavy) is an open empirical question and likely depends on `core_S`: inner-heavy fits vocab-grounded cores (Soft Thinking, ArgmaxResample); outer-heavy fits Identity / body-format cores where outer boundary layers need the most LoRA capacity to compensate for input-format mismatch.
+A config's rank list may be shorter than the model's `k_in`/`k_out` — outer slots are skipped automatically. Optimal shape (inner-heavy vs outer-heavy) is an open empirical question and likely depends on `core_S`: inner-heavy fits vocab-grounded cores (Soft Thinking, ExactNextToken); outer-heavy fits Identity / body-format cores where outer boundary layers need the most LoRA capacity to compensate for input-format mismatch.
 
 **`BoundaryConfig.init`** is `"zero"` (default — Kaiming-A / zero-B, delta=0 at init) or `"soft_skip"` (SVD-init so that `scale·BA ≈ -W_topr` — the wrapped layer's contribution is partially cancelled at init). `"soft_skip"` is the natural companion to outer-heavy + Identity core.
 
 **`BoundaryConfig.train_base`** (default `False`): when `True`, the Boundary calls `requires_grad_(True)` on every parameter of every base layer it holds — both `ranks[i] == 0` and `ranks[i] > 0` slots. The body (layers between `k_in` and `L − k_out`) stays frozen regardless. This is the path to CoT-style fine-tuning of the boundary region. Note: base layers are shared across Standardizations — if any one Boundary over a layer sets `train_base=True`, that layer is trainable for every Standardization.
+
+**`ReasoningLoopModel.set_freeze_mode(mode)`** (`"reasoning"` | `"standardization"` | `"none"`; default `"reasoning"`, stored on `model.freeze_mode`): rewrites `requires_grad` on exactly two groups — the **reasoning** body `layers[k_in : L − k_out]` (`reasoning_parameters()`) and the **standardization** LoRA adapters + each `core_S`'s own params (`standardization_parameters()`). `"reasoning"` freezes the body / trains the standardization; `"standardization"` is the inverse; `"none"` trains both. Base params a `core_S` only references (`embed`/`norm`/`lm_head`) are excluded — they stay frozen with the base. The toggle never unfreezes the boundary layers (first `k_in`, last `k_out`) or `embed`/`norm`/`lm_head`, so `"none"` frees *all* transformer layers only when `k_in = k_out = 0`. Orthogonal to `train_base`, which is the only path to training the boundary layers.
 
 **Integration notes (KV cache, FSDP, torch.compile):** see `README.md` and the docstring on `ReasoningLoopModel`. Short version: `**kw` is threaded to every layer call, but don't pass `past_key_values` to a `forward()` with a non-empty schedule (loop re-passes corrupt the cache). FSDP wrap plan targets each `Standardization` and each `base.model.layers[i]`. Each `Boundary.forward` is a graph break under torch.compile; `encode`/`decode` compile cleanly.
 

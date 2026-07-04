@@ -52,7 +52,7 @@ def main():
 
     configurations = [
         ("COCONUT",                  cfgs.coconut),
-        ("CoT (argmax)",             cfgs.cot),
+        ("CoT (exact)",              cfgs.cot),
         ("Soft Thinking",            cfgs.soft_thinking),
         ("Frozen boundary k=4,4",    lambda: cfgs.frozen_baseline(4, 4)),
         ("Uniform LoRA r=8",         lambda: cfgs.uniform_lora(4, 4, rank=8)),

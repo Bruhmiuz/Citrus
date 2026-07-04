@@ -5,7 +5,7 @@ from .boundary import Boundary, build_boundary
 from .standardization import Standardization
 from .core import (
     Identity,
-    ArgmaxResample,
+    ExactNextToken,
     SoftmaxEmbedMixture,
     MLPCore,
     Codebook,
@@ -22,7 +22,7 @@ __all__ = [
     "build_boundary",
     "Standardization",
     "Identity",
-    "ArgmaxResample",
+    "ExactNextToken",
     "SoftmaxEmbedMixture",
     "MLPCore",
     "Codebook",

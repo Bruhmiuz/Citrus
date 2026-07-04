@@ -48,6 +48,9 @@ class ReasoningLoopModel(nn.Module):
         a graph break.
     """
 
+    #: Valid arguments to `set_freeze_mode`.
+    FREEZE_MODES = ("reasoning", "standardization", "none")
+
     def __init__(self, base_model: nn.Module, k_in: int, k_out: int,
                  standardizations: list[tuple[BoundaryConfig, BoundaryConfig, nn.Module]]):
         super().__init__()
@@ -80,6 +83,11 @@ class ReasoningLoopModel(nn.Module):
             Standardization(base_model, head_cfg, tail_cfg, core_S, k_in, k_out)
             for head_cfg, tail_cfg, core_S in standardizations
         ])
+
+        # Default state: frozen body, trainable standardization — the same
+        # partition the base freeze above already produces. Recorded so the
+        # freeze mode is always introspectable and set explicitly.
+        self.freeze_mode = "reasoning"
 
     # ------------------------------------------------------------------
     # Stage primitives
@@ -137,3 +145,54 @@ class ReasoningLoopModel(nn.Module):
 
     def total_parameter_count(self) -> int:
         return sum(p.numel() for p in self.parameters())
+
+    # ------------------------------------------------------------------
+    # Freeze mode
+    # ------------------------------------------------------------------
+
+    def reasoning_parameters(self):
+        """Parameters of the reasoning body: base layers[k_in : L - k_out]."""
+        for layer in self.base.model.layers[self.k_in : self.L - self.k_out]:
+            yield from layer.parameters()
+
+    def standardization_parameters(self):
+        """Standardization-owned parameters: LoRA adapters + each core_S's own
+        params, excluding any base parameter a core_S merely references (e.g.
+        embed / norm / lm_head, or a reused body layer). Those base-shared
+        params stay governed by the frozen base, never by this component."""
+        base_ids = {id(p) for p in self.base.parameters()}
+        for p in self.standardizations.parameters():
+            if id(p) not in base_ids:
+                yield p
+
+    def set_freeze_mode(self, mode: str) -> None:
+        """Toggle which trainable-eligible component is frozen.
+
+        Governs exactly two parameter groups:
+          - reasoning:      base layers[k_in : L - k_out]   (see reasoning_parameters)
+          - standardization: LoRA adapters + core_S own params (see
+                             standardization_parameters)
+
+        Modes:
+          - "reasoning":       freeze the reasoning body, train the standardization
+          - "standardization": freeze the standardization, train the reasoning body
+          - "none":            train both
+
+        The base's non-body parameters — the first k_in and last k_out boundary
+        layers, plus embed_tokens / norm / lm_head, and any base param a core_S
+        references — are NOT governed here and remain frozen (as set at
+        construction, or as `BoundaryConfig.train_base` left them). Consequently
+        "none" only unfreezes *all* transformer layers when k_in = k_out = 0;
+        otherwise the boundary layers stay frozen.
+        """
+        if mode not in self.FREEZE_MODES:
+            raise ValueError(
+                f"mode must be one of {self.FREEZE_MODES}, got {mode!r}"
+            )
+        train_reasoning = mode in ("standardization", "none")
+        train_standardization = mode in ("reasoning", "none")
+        for p in self.reasoning_parameters():
+            p.requires_grad_(train_reasoning)
+        for p in self.standardization_parameters():
+            p.requires_grad_(train_standardization)
+        self.freeze_mode = mode

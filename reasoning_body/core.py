@@ -19,19 +19,37 @@ class Identity(nn.Module):
         return h
 
 
-class ArgmaxResample(nn.Module):
-    """CoT-style core: project to vocabulary, take argmax, re-embed.
+class ExactNextToken(nn.Module):
+    """CoT-style core: re-embed the model's exact greedy next-token prediction.
+
+    Projects the hidden state to the vocabulary through the base model's
+    genuine prediction head — the final norm followed by the unembedding,
+    exactly as ReasoningLoopModel.decode does — then argmaxes and re-embeds:
+
+        S(h) = embed( argmax( lm_head( norm(h) ) ) )
+
+    Running `norm` before `lm_head` is what makes the chosen token the model's
+    true greedy prediction rather than an un-normed approximation. `norm` may
+    be None for base models with no final normalisation layer.
 
     Non-differentiable through the argmax; used for inference-time
-    instantiations or as a baseline. With k_in = k_out = 0, this is the
-    embed/unembed-only CoT loop.
+    instantiations or as a CoT baseline. Per-position: it does not shift,
+    grow, or preserve prompt tokens — autoregressive-CoT sequence semantics
+    live in the loop, not the core. "Exact" refers to the prediction *head*;
+    whether the hidden state reaching this core is the model's true
+    final-layer state depends on the tail Boundary spanning the full tail
+    region (or k_out = 0).
     """
-    def __init__(self, unembed: nn.Linear, embed: nn.Embedding):
+    def __init__(self, norm: nn.Module | None, unembed: nn.Linear,
+                 embed: nn.Embedding):
         super().__init__()
+        self.norm = norm
         self.unembed = unembed
         self.embed = embed
 
     def forward(self, h: torch.Tensor) -> torch.Tensor:
+        if self.norm is not None:
+            h = self.norm(h)
         logits = self.unembed(h)
         ids = logits.argmax(dim=-1)
         return self.embed(ids)
